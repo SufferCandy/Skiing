@@ -4,70 +4,97 @@ using UnityEngine.InputSystem;
 
 public class PlayerControl : MonoBehaviour
 {
-    public static PlayerControl Instance;
-    
-    private InputAction move;
-    [SerializeField] private float turnSpeed = 10;
-    [SerializeField] private float speed = 10;
-    [SerializeField] private LayerMask ground;
-    [SerializeField] private Vector3 obstacleKnockback;
-    
-    private bool canMove = true;
-    
-    Rigidbody rb;
-    
-    private void OnEnable()
-    {
-        Obstacle.OnObstacleHit += OnCollision;
-    }
-    
-    private void OnDisable()
-    {
-        Obstacle.OnObstacleHit -= OnCollision;
-    }
+    [Header("Speed")]
+    [SerializeField] private float minSpeed = 8f;
+    [SerializeField] private float maxSpeed = 1200f;
 
-    private void OnCollision()
-    {
-        Debug.Log("Hit stone");
-        rb.AddForce(obstacleKnockback, ForceMode.Impulse);
-        canMove = false;
-        Invoke("AllowMove", 2);
-    }
+    [Header("Carving")]
+    [SerializeField] private float downhillAcceleration = 700f; // pull of gravity with skis pointed straight down the fall line
+    [SerializeField] private float carveBraking = 500f;         // speed scrubbed off while edging through a turn
+    [SerializeField] private float snowFriction = 60f;          // constant drag from snow, even when gliding straight
 
-    private void AllowMove()
-    {
-        canMove = true;
-    }
+    [Header("Turning")]
+    [SerializeField] private float maxTurnRate = 90f;
+    [SerializeField] private float turnAcceleration = 260f;
+    [SerializeField] private float turnDeceleration = 420f;
 
+    [Header("Ground Check")]
+    [SerializeField] private float groundCheckDistance = 0.3f;
+    [SerializeField] private LayerMask groundLayers = ~0;
 
-    private void Awake()
-    {
-        move = InputSystem.actions.FindAction("Player/Move");
-        rb = GetComponent<Rigidbody>();
-        Instance = this;
-    }
+    [Header("Track Bounds")]
+    [SerializeField] private bool keepInsideTrack = true;
 
-    // Start is called once before the first execution of Update after the MonoBehaviour is created
+    private float speed = 0f;
+    private float currentTurnRate = 0f;
+    private float targetTurn = 0f;
+    private bool isGrounded = true;
+    private Rigidbody rb;
+    private Animator animator;
+
     void Start()
     {
-        
+        rb = GetComponent<Rigidbody>();
+        animator = GetComponent<Animator>();
+        speed = minSpeed;
     }
 
-    // Update is called once per frame
+    void Update()
+    {
+        float y = transform.eulerAngles.y;
+        targetTurn = 0f;
+
+        if (Keyboard.current.aKey.isPressed && y < 269f)
+            targetTurn = maxTurnRate;
+        if (Keyboard.current.dKey.isPressed && y > 91f)
+            targetTurn = -maxTurnRate;
+    }
+
     void FixedUpdate()
     {
-        if (canMove) return;
-        bool isGrounded = Physics.Linecast(transform.position, transform.position -Vector3.up, ground);
-        Debug.DrawLine(transform.position, transform.position + Vector3.up, isGrounded ? Color.red : Color.blue);
+        // Ground check
+        isGrounded = Physics.Raycast(transform.position + Vector3.up * 0.1f, Vector3.down,
+            groundCheckDistance + 0.1f, groundLayers);
+
+        // Smooth turn rate
+        float ramp = targetTurn != 0f ? turnAcceleration : turnDeceleration;
+        currentTurnRate = Mathf.MoveTowards(currentTurnRate, targetTurn, ramp * Time.fixedDeltaTime);
+
+        if (Mathf.Abs(currentTurnRate) > 0.01f)
+            rb.MoveRotation(rb.rotation * Quaternion.Euler(0f, currentTurnRate * Time.fixedDeltaTime, 0f));
+
+        // Gravity pulls along the skis: full acceleration pointed down the fall line,
+        // nothing when traversing across the slope
+        float angle = Mathf.Abs(Mathf.DeltaAngle(transform.eulerAngles.y, 180f));
+        float fallLineAlignment = Mathf.Cos(angle * Mathf.Deg2Rad);
+        float accel = downhillAcceleration * fallLineAlignment - snowFriction;
+
+        // Edging through a turn digs the edges in and scrubs speed,
+        // harder the faster you are going
+        float edgeFactor = Mathf.Abs(currentTurnRate) / maxTurnRate;
+        accel -= carveBraking * edgeFactor * (0.4f + 0.6f * speed / maxSpeed);
+
         if (isGrounded)
-        {
-            Vector2 moveVector = move. ReadValue<Vector2>();
-            Debug.Log("move x:" + moveVector.x + "move y:" + moveVector.y);
-            float rotateSpeed= -moveVector.x* turnSpeed* Time.fixedDeltaTime; 
-            rb.AddTorque(new Vector3(0, rotateSpeed, 0));
-        }
-        
-        float speedMultiplier = Mathf.Abs(Mathf.Cos(Mathf.Deg2Rad * transform.eulerAngles.y));
-        rb.AddForce(transform.forward * (speed * speedMultiplier * Time.fixedDeltaTime));
+            speed += accel * Time.fixedDeltaTime;
+        speed = Mathf.Clamp(speed, minSpeed, maxSpeed);
+
+        animator.SetFloat("playerSpeed", speed);
+        animator.SetBool("grounded", isGrounded);
+
+        Vector3 velocity = transform.forward * speed * Time.fixedDeltaTime;
+        rb.linearVelocity = new Vector3(velocity.x, rb.linearVelocity.y, velocity.z);
+
+        if (keepInsideTrack)
+            KeepInsideTrack();
+    }
+
+    private void KeepInsideTrack()
+    {
+        Vector3 position = rb.position;
+        float clampedX = Mathf.Clamp(position.x, RaceCourseLayout.MinTrackX, RaceCourseLayout.MaxTrackX);
+        if (Mathf.Approximately(position.x, clampedX)) return;
+
+        rb.MovePosition(new Vector3(clampedX, position.y, position.z));
+        rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, rb.linearVelocity.z);
     }
 }
